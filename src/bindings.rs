@@ -39,9 +39,9 @@ struct UserFmtBinding {
 }
 
 static DEFAULT_BINDINGS: &'static [UserFmtBinding] = &[
+    UserFmtBinding {key: "S-q",      action: "kill_client", args: None},
     UserFmtBinding {key: "S-Return", action: "exec", args: Some("alacritty")},
     UserFmtBinding {key: "S-e",      action: "exec", args: Some("spacefm")},
-    UserFmtBinding {key: "S-q",      action: "kill_client", args: None},
 ];
 
 pub struct KeyManager {
@@ -91,16 +91,16 @@ impl KeyManager {
                             Rc::new(move |ref mut _wm| {
                                 spawn(binding.args.unwrap());
                             })
-                            // }) as Action
                         );
                     } else {
+                        // debug!("inserting kill client");
+                        // std::thread::sleep(std::time::Duration::from_millis(10));
                         self.bindings.insert(key_code, 
                         // bindings.insert(key_code, 
                             // Box::new(move |ref mut wm| {
                             Rc::new(move |ref mut wm| {
                                 wm.kill_client();
                             })
-                            // }) as Action
                         );
                     }
                     // match iter.next() {
@@ -115,6 +115,7 @@ impl KeyManager {
                 },
             };
         }
+        // debug!("Map: {:?}", self.bindings.keys());
         for key in self.bindings.keys() {
         // for key in bindings.keys() {
             conn.grab_key(key);
@@ -131,20 +132,19 @@ impl KeyManager {
             match parse_key_binding(key, &self.keycodes) {
                 None => panic!("invalid key binding: {}", key),
                 Some(key_code) => {
-                    // debug!("key: {:?}", key_code);
-                    conn.grab_key(&key_code);
+                    debug!("key: {:?}", key_code);
                     let action_str = action.remove(0);
                     // remove trailing nul
                     if action_str == "exec" {
                         let action = action.join(" ");
-                        // debug!("action: {:?}", action);
+                        debug!("action: {:?}", action);
                         self.bindings.insert(key_code, 
                             Rc::new(move |ref mut _wm| {
                                 spawn(action.trim_end_matches(char::from(0)));
                                 // spawn(action);
                             })
                         );
-                        // debug!("Map: {:?}", self.bindings.keys());
+                        debug!("Map: {:?}", self.bindings.keys());
                     } else {
                         self.bindings.insert(key_code, 
                             Rc::new(move |ref mut wm| {
@@ -152,6 +152,7 @@ impl KeyManager {
                             })
                         );
                     }
+                    conn.grab_key(&key_code);
                 },
             }
     }

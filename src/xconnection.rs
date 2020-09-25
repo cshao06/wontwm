@@ -20,6 +20,13 @@ const NEW_WINDOW_MASK: &[(u32, u32)] = &[(
     xcb::EVENT_MASK_ENTER_WINDOW | xcb::EVENT_MASK_LEAVE_WINDOW | xcb::EVENT_MASK_PROPERTY_CHANGE,
 )];
 const INPUT_FOCUS_PARENT: u8 = xcb::INPUT_FOCUS_PARENT as u8;
+const PROP_MODE_REPLACE: u8 = xcb::PROP_MODE_REPLACE as u8;
+
+const CONFIG_WINDOW_BORDER_WIDTH: u16 = xcb::CONFIG_WINDOW_BORDER_WIDTH as u16;
+const CONFIG_WINDOW_HEIGHT: u16 = xcb::CONFIG_WINDOW_HEIGHT as u16;
+const CONFIG_WINDOW_WIDTH: u16 = xcb::CONFIG_WINDOW_WIDTH as u16;
+const CONFIG_WINDOW_X: u16 = xcb::CONFIG_WINDOW_X as u16;
+const CONFIG_WINDOW_Y: u16 = xcb::CONFIG_WINDOW_Y as u16;
 
 macro_rules! atoms {
     ( $( $name:ident ),+ ) => {
@@ -34,7 +41,7 @@ macro_rules! atoms {
             pub fn new(conn: &xcb::Connection) -> Result<InternedAtoms> {
                 Ok(InternedAtoms {
                     $(
-                        $name: XcbConnection::intern_atom(conn, stringify!($name))?
+                        $name: xcb::intern_atom(conn, false, stringify!($name)).get_reply()?.atom()
                     ),*
                 })
             }
@@ -44,7 +51,8 @@ macro_rules! atoms {
     ( $( $name:ident ),+ , ) => (atoms!($( $name ),+);)
 }
 
-atoms!(WM_DELETE_WINDOW, WM_PROTOCOLS, WM_NAME, WM_CLASS);
+// Intern atoms that are not built-in in icccm or ewmh
+atoms!(WM_DELETE_WINDOW, UTF8_STRING);
 
 /// An X key-code along with a modifier mask
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -171,6 +179,10 @@ impl Point {
  */
 #[derive(Debug, Clone)]
 pub enum XEvent {
+    // CreateNotify {
+    //     id: Window,
+    // },
+
     ClientCommand {
         format: u8,
         window: Window,
@@ -253,15 +265,20 @@ pub enum XEvent {
     //     is_root: bool,
     // },
 
-    // /// xcb docs: https://www.mankier.com/3/xcb_property_notify_event_t
-    // PropertyNotify {
-    //     /// The ID of the window that had a property changed
-    //     id: Window,
-    //     /// The property that changed
-    //     atom: String,
-    //     /// Is this window the root window?
-    //     is_root: bool,
-    // },
+    ConfigureRequest {
+        win: Window
+    },
+
+    /// xcb docs: https://www.mankier.com/3/xcb_property_notify_event_t
+    PropertyNotify {
+        /// The ID of the window that had a property changed
+        id: Window,
+        /// The property that changed
+        // atom: String,
+        atom: Atom,
+        /// Is this window the root window?
+        is_root: bool,
+    },
 
     // /// https://www.mankier.com/3/xcb_client_message_event_t
     // ClientMessage {
@@ -280,9 +297,8 @@ pub struct XcbConnection {
     conn: ewmh::Connection,
     preferred_screen: i32,
     root: Window,
+    atoms: InternedAtoms,
     // check_win: Window,
-    // TODO: fix pub
-    pub atoms: InternedAtoms,
     // auto_float_types: Vec<&'static str>,
     // randr_base: u8,
 }
@@ -306,17 +322,7 @@ impl XcbConnection {
             .context(format!("Unable to get handle for the preferred screen"))?
             .root();
 
-        // Register for substructure redirection
-        // https://jichu4n.com/posts/how-x-window-managers-work-and-how-to-write-one-part-i/#substructure-redirection
-        // xcb docs: https://www.mankier.com/3/xcb_change_window_attributes_checked
-        xcb::change_window_attributes_checked(&conn, root, ROOT_EVENT_MASK)
-            .request_check()
-            .context("Could not register SUBSTRUCTURE_NOTIFY/REDIRECT")?;
-
-        conn.flush();
-        // https://www.mankier.com/3/xcb_intern_atom
         let atoms = InternedAtoms::new(&conn).context("Failed to intern atoms")?;
-
 
         // xcb docs: https://www.mankier.com/3/xcb_create_window
         // xcb::create_window(
@@ -344,8 +350,24 @@ impl XcbConnection {
         })
     }
 
-    // pub fn register_wm() -> bool {
-    // }
+    pub fn raw_conn(&self) -> &ewmh::Connection {
+        &self.conn
+    }
+
+    pub fn root(&self) -> Window {
+        self.root
+    }
+
+    pub fn register_wm(&self) -> Result<()> {
+        // Register for substructure redirection
+        // https://jichu4n.com/posts/how-x-window-managers-work-and-how-to-write-one-part-i/#substructure-redirection
+        xcb::change_window_attributes_checked(&self.conn, self.root, ROOT_EVENT_MASK)
+            .request_check()
+            .context("Could not register SUBSTRUCTURE_NOTIFY/REDIRECT")?;
+        // TODO: necessary?
+        self.conn.flush();
+        Ok(())
+    }
 
     pub fn flush(&self) -> bool {
         self.conn.flush()
@@ -383,6 +405,14 @@ impl XcbConnection {
         //     );
         // }
 
+    }
+
+    pub fn register_events(&self, id: Window, events: u32) -> Result<()> {
+
+        xcb::change_window_attributes_checked(&self.conn, id, &[(xcb::CW_EVENT_MASK, events)])
+            .request_check()
+            .context(format!("Could not register events: {}", events))?;
+        Ok(())
     }
 
     pub fn focus_client(&self, id: Window) {
@@ -439,41 +469,56 @@ impl XcbConnection {
         // );
     }
 
-    pub fn str_prop(&self, id: Window, atom: Atom) -> Result<String> {
-        // xcb docs: https://www.mankier.com/3/xcb_get_property
-        let cookie = xcb::get_property(
-            &self.conn,       // xcb connection to X11
-            false,            // should the property be deleted
-            id,               // target window to query
-            atom, // the property we want
-            xcb::ATOM_ANY,    // the type of the property
-            0,                // offset in the property to retrieve data from
-            1024,             // how many 32bit multiples of data to retrieve
-        );
-
-        Ok(String::from_utf8(cookie.get_reply()?.value().to_vec())?)
+    pub fn get_wm_name(&self, id: Window) -> Result<String> {
+        // TODO: ewmh defines _NET_WM_NAME, which should be used in preference to WM_NAME
+        // ewmh::get_wm_name probably deal with this for us
+        Ok(ewmh::get_wm_name(&self.conn, id).get_reply()?.string().to_string())
     }
 
-    fn atom_prop(&self, id: Window, atom: Atom) -> Result<u32> {
-        // xcb docs: https://www.mankier.com/3/xcb_get_property
-        let cookie = xcb::get_property(
-            &self.conn,       // xcb connection to X11
-            false,            // should the property be deleted
-            id,               // target window to query
-            atom, // the property we want
-            xcb::ATOM_ANY,    // the type of the property
-            0,                // offset in the property to retrieve data from
-            1024,             // how many 32bit multiples of data to retrieve
-        );
-
-        let reply = cookie.get_reply()?;
-        if reply.value_len() <= 0 {
-            // TODO: fix print
-            Err(anyhow!("property '{}' was empty for id: {}", atom, id))
-        } else {
-            Ok(reply.value()[0])
-        }
+    pub fn get_wm_class(&self, win: Window) -> Result<String> {
+        Ok(icccm::get_wm_class(&self.conn, win).get_reply()?.class().to_string())
     }
+
+    pub fn get_text_property(&self, win: Window, atom: Atom) -> Result<String> {
+        // Ok(icccm::get_text_property(&self.conn, win, atom).get_reply()?.name().to_string())
+            // String::from_utf8(cookie.get_reply()?.value().to_vec())?
+        let prop = icccm::get_text_property(&self.conn, win, atom).get_reply()?.name().to_string();
+        // debug!("got property: {:?}", prop);
+        Ok(prop)
+    }
+
+    pub fn set_text_property(&self, win: Window, atom: Atom, data: &str) {
+        xcb::change_property(
+            &self.conn,                        // xcb connection to X11
+            PROP_MODE_REPLACE,                 // discard current prop and replace
+            win,                    // window to change prop on
+            atom,  // prop to change
+            self.atoms.UTF8_STRING, // type of prop
+            8,                                 // data format (8/16/32-bit)
+            data.as_bytes(),                // data
+        );
+    }
+
+    // fn atom_prop(&self, id: Window, atom: Atom) -> Result<u32> {
+    //     // xcb docs: https://www.mankier.com/3/xcb_get_property
+    //     let cookie = xcb::get_property(
+    //         &self.conn,       // xcb connection to X11
+    //         false,            // should the property be deleted
+    //         id,               // target window to query
+    //         atom, // the property we want
+    //         xcb::ATOM_ANY,    // the type of the property
+    //         0,                // offset in the property to retrieve data from
+    //         1024,             // how many 32bit multiples of data to retrieve
+    //     );
+
+    //     let reply = cookie.get_reply()?;
+    //     if reply.value_len() <= 0 {
+    //         // TODO: fix print
+    //         Err(anyhow!("property '{}' was empty for id: {}", atom, id))
+    //     } else {
+    //         Ok(reply.value()[0])
+    //     }
+    // }
 
 
     pub fn wait_for_event(&self) -> Option<XEvent> {
@@ -490,6 +535,12 @@ impl XcbConnection {
             // debug!("event {:?}", etype);
 
             match etype {
+                // xcb::CREATE_NOTIFY => {
+                //     let e:&xcb::CreateNotifyEvent = unsafe { xcb::cast_event(&event) };
+                //     Some(XEvent::CreateNotify {
+                //         id: e.window(),
+                //     })
+                // }
                 xcb::CLIENT_MESSAGE => {
                     let e:&xcb::ClientMessageEvent = unsafe { xcb::cast_event(&event) };
                     let mut data: [u8; 20] = [0; 20];
@@ -576,6 +627,13 @@ impl XcbConnection {
                 //     })
                 // }
 
+                xcb::CONFIGURE_REQUEST => {
+                    let e: &xcb::ConfigureRequestEvent = unsafe { xcb::cast_event(&event) };
+                    Some(XEvent::ConfigureRequest {
+                        win: e.window(),
+                    })
+                }
+
                 // xcb::CLIENT_MESSAGE => {
                 //     let e: &xcb::ClientMessageEvent = unsafe { xcb::cast_event(&event) };
                 //     xcb::xproto::get_atom_name(&self.conn, e.type_())
@@ -595,25 +653,32 @@ impl XcbConnection {
                 //         })
                 // }
 
-                // xcb::PROPERTY_NOTIFY => {
-                //     let e: &xcb::PropertyNotifyEvent = unsafe { xcb::cast_event(&event) };
-                //     xcb::xproto::get_atom_name(&self.conn, e.atom())
-                //         .get_reply()
-                //         .ok()
-                //         .and_then(|a| {
-                //             let atom = a.name().to_string();
-                //             let is_root = e.window() == self.root;
-                //             if is_root && !(atom == "WM_NAME" || atom == "_NET_WM_NAME") {
-                //                 None
-                //             } else {
-                //                 Some(XEvent::PropertyNotify {
-                //                     id: e.window(),
-                //                     atom,
-                //                     is_root,
-                //                 })
-                //             }
-                //         })
-                // }
+                xcb::PROPERTY_NOTIFY => {
+                    let e: &xcb::PropertyNotifyEvent = unsafe { xcb::cast_event(&event) };
+                    let atom = e.atom();
+                    let is_root = e.window() == self.root;
+                    Some(XEvent::PropertyNotify {
+                        id: e.window(),
+                        atom,
+                        is_root,
+                    })
+                    // xcb::xproto::get_atom_name(&self.conn, e.atom())
+                    //     .get_reply()
+                    //     .ok()
+                    //     .and_then(|a| {
+                    //         let atom = a.name().to_string();
+                    //         let is_root = e.window() == self.root;
+                    //         if is_root && !(atom == "WM_NAME" || atom == "_NET_WM_NAME") {
+                    //             None
+                    //         } else {
+                    //             Some(XEvent::PropertyNotify {
+                    //                 id: e.window(),
+                    //                 atom,
+                    //                 is_root,
+                    //             })
+                    //         }
+                    //     })
+                }
 
                 // NOTE: ignoring other event types
                 _ => None,
@@ -638,8 +703,9 @@ impl XcbConnection {
     //     self.atom(atom)
     // }
     /// Returns the Atom identifier associated with the atom_name str.
-    pub fn intern_atom(conn: &xcb::Connection, atom_name: &str) -> Result<xcb::Atom> {
-        Ok(xcb::intern_atom(conn, false, atom_name).get_reply()?.atom())
+    // pub fn intern_atom(conn: &xcb::Connection, atom_name: &str) -> Result<xcb::Atom> {
+    pub fn intern_atom(&self, atom_name: &str) -> Result<Atom> {
+        Ok(xcb::intern_atom(&self.conn, false, atom_name).get_reply()?.atom())
     }
 
 
@@ -662,13 +728,14 @@ impl XcbConnection {
     /// protocols that it supports.
     fn get_wm_protocols(&self, id: Window) -> Result<Vec<xcb::Atom>> {
         // let reply = icccm::get_wm_protocols(&self.conn, id, self.atoms.WM_PROTOCOLS)
-        let reply = icccm::get_wm_protocols(&self.conn, id, self.atoms.WM_PROTOCOLS)
+        let reply = icccm::get_wm_protocols(&self.conn, id, self.conn.WM_PROTOCOLS())
             .get_reply()?;
         Ok(reply.atoms().to_vec())
     }
 
     fn send_client_event(&self, id: Window, atom: Atom) -> Result<()> {
-        let wm_protocols = self.atoms.WM_PROTOCOLS;
+        // TODO: use ewmh
+        let wm_protocols = self.conn.WM_PROTOCOLS();
         let data = xcb::ClientMessageData::from_data32([atom, xcb::CURRENT_TIME, 0, 0, 0]);
         let event = xcb::ClientMessageEvent::new(32, id, wm_protocols, data);
         xcb::send_event(&self.conn, false, id, xcb::EVENT_MASK_NO_EVENT, &event);

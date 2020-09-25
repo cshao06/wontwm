@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+killall wontwm
+killall Xephyr
+
+cargo build
+
 CUR_DIR="$(dirname $(readlink -f $0))"
 SCREEN_SIZE=${SCREEN_SIZE:-800x600}
 XDISPLAY=${XDISPLAY:-:1}

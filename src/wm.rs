@@ -3,6 +3,7 @@ use crate::{
     xconnection::{XcbConnection, XEvent, XcbKey},
     bindings::KeyManager,
     client::Client,
+    ipc,
 };
 
 use std::{
@@ -13,16 +14,34 @@ use std::{
 use anyhow::{Result, Context};
 
 use xcb::{Window, Atom};
+use xcb_util::{ewmh, icccm};
 
-pub enum Commands {
-    BindKey,
-    UnbindKey,
-    ListBindings,
-    Quit,
-    Reload,
-    Set,
-    // Invalid,
-}
+// macro_rules! atoms {
+//     ( $( $name:ident ),+ ) => {
+//         #[allow(non_snake_case)]
+//         pub struct InternedAtoms {
+//             $(
+//                 pub $name: xcb::Atom
+//             ),*
+//         }
+
+//         impl InternedAtoms {
+//             pub fn new(conn: &XcbConnection) -> Result<InternedAtoms> {
+//                 Ok(InternedAtoms {
+//                     $(
+//                         // $name: XcbConnection::intern_atom(conn, stringify!($name))?
+//                         $name: conn.intern_atom(stringify!($name))?
+//                     ),*
+//                 })
+//             }
+//         }
+//     };
+//     // Allow trailing comma:
+//     ( $( $name:ident ),+ , ) => (atoms!($( $name ),+);)
+// }
+
+// atoms!(WM_DELETE_WINDOW);
+
 
 // pub struct WindowManager<T: 'a XConn> {
 //     conn: &'a dyn XConn,
@@ -34,40 +53,50 @@ pub struct WindowManager {
     keyman: KeyManager,
     clients: HashMap<Window, Client>,
     focused_client: Option<Window>,
+    // atoms: InternedAtoms,
+    ipc_atom_command: Atom,
+    ipc_atom_state: Atom,
 }
 
 impl WindowManager {
     pub fn new() -> Result<Self> {
+        let conn = XcbConnection::new()?;
+        // let atoms = InternedAtoms::new(&conn).context("Failed to intern atoms")?;
+        conn.register_wm()?;
+        let ipc_atom_command = conn.intern_atom(ipc::IPC_COMMAND_ATOM)?;
+        let ipc_atom_state = conn.intern_atom(ipc::IPC_STATE_ATOM)?;
+
+        let mut keyman = KeyManager::new();
+        keyman.set_default_bindings(&conn);
         let mut wm = WindowManager {
-            conn: XcbConnection::new()?,
+            conn,
             config: Config::default(),
             // key_bindings: KeyBindings::new(),
-            keyman: KeyManager::new(),
+            // keyman: KeyManager::new(),
+            keyman,
             clients: HashMap::new(),
             focused_client: None,
+            // atoms,
+            ipc_atom_command,
+            ipc_atom_state,
         };
+
+        // bindings::set_default_bindings(&mut self.key_bindings, &self.conn);
 
         wm.detect_screens();
 
         Ok(wm)
-
-        // Ok(WindowManager {
-        //     conn: XcbConnection::new()?,
-        //     config: Config::default(),
-        //     keyman: KeyManager::new(&self.conn),
-        // })
     }
+
 
     // pub fn run(&mut self, mut bindings: KeyBindings) {
     pub fn run(&mut self) {
-        self.keyman.set_default_bindings(&self.conn);
-        // bindings::set_default_bindings(&mut self.key_bindings, &self.conn);
-
         loop {
             if let Some(event) = self.conn.wait_for_event() {
                 debug!("got XEvent: {:?}", event);
                 match event {
-                    XEvent::ClientCommand { format, window, atom, data} => self.handle_client_message(format, window, atom, data),
+                    // XEvent::ClientCommand { format, window, atom, data} => self.handle_client_message(format, window, atom, data),
+                    // XEvent::CreateNotify { id } => self.handle_create_notify(id),
                     XEvent::KeyPress { code } => self.handle_key_press(code),
                     XEvent::MapRequest { id, ignore } => self.handle_map_request(id, ignore),
                     // XEvent::Enter { id, rpt, wpt } => self.handle_enter_notify(id, rpt, wpt),
@@ -76,11 +105,14 @@ impl WindowManager {
                     // XEvent::ScreenChange => self.handle_screen_change(),
                     // XEvent::RandrNotify => self.detect_screens(),
                     // XEvent::ConfigureNotify { id, r, is_root } => {
-                    //     self.handle_configure_notify(id, r, is_root)
+                        // self.handle_configure_notify(id, is_root)
                     // }
-                    // XEvent::PropertyNotify { id, atom, is_root } => {
-                    //     self.handle_property_notify(id, &atom, is_root)
-                    // }
+                    XEvent::ConfigureRequest { win } => {
+                        self.handle_configure_request(win)
+                    }
+                    XEvent::PropertyNotify { id, atom, is_root } => {
+                        self.handle_property_notify(id, atom, is_root)
+                    }
                     // XEvent::ClientMessage { id, dtype, data } => {
                     //     self.handle_client_message(id, &dtype, &data)
                     // }
@@ -126,21 +158,37 @@ impl WindowManager {
         // run_hooks!(screens_updated, self, &regions);
     }
 
-    fn handle_client_message(&mut self, format: u8, window: Window, atom: Atom, data: [u8; 20]) {
-        let command = data[0];
-        let args = String::from_utf8(data[1..].to_vec()).unwrap();
-        // TODO: fix enum from primitive
-        match command {
-            0 => { // BindKey
-                let mut args: Vec<&str> = args.split(' ').collect();
-                let key_str = args.remove(0);
-                // let args_str = args.collect().join(' ');
-                self.keyman.bind_key(&self.conn, key_str, args);
+    // fn handle_create_notify(&self, win: Window) {
+    fn handle_configure_request(&self, win: Window) {
+        match self.conn.get_wm_class(win) {
+            Ok(c) => {
+                debug!("class: {}", c);
+                if c == ipc::IPC_WINDOW_CLASS {
+                    // TODO: handle error
+                    self.conn.register_events(win, xcb::EVENT_MASK_PROPERTY_CHANGE);
+                    self.conn.set_text_property(win, self.ipc_atom_state, ipc::IPC_STATE_SERVER_READY);
+                    debug!("Ready for property change on the ipc client window");
+                }
             },
-            _ => return
-        } 
-
+            Err(e) => debug!("handle_configure_request: Failed to get window class {:?}", e)
+        }
     }
+
+    // fn handle_client_message(&mut self, format: u8, window: Window, atom: Atom, data: [u8; 20]) {
+    //     let command = data[0];
+    //     let args = String::from_utf8(data[1..].to_vec()).unwrap();
+    //     // TODO: fix enum from primitive
+    //     match command {
+    //         0 => { // BindKey
+    //             let mut args: Vec<&str> = args.split(' ').collect();
+    //             let key_str = args.remove(0);
+    //             // let args_str = args.collect().join(' ');
+    //             self.keyman.bind_key(&self.conn, key_str, args);
+    //         },
+    //         _ => return
+    //     } 
+
+    // }
 
     // fn handle_configure_request(&self, event: &xcb::ConfigureRequestEvent) -> Option<Event> {
     //     // This request is not interesting for us: grant it unchanged.
@@ -194,13 +242,21 @@ impl WindowManager {
             // }
         }
     }
-    // fn on_key_press(&mut self, key: KeyCombo) {
-    //     if let Some(handler) = self.keys.get(&key) {
-    //         if let Err(error) = (handler)(self) {
-    //             error!("Error running command for key command {:?}: {}", key, error);
-    //         }
-    //     }
-    // }
+
+    fn handle_property_notify(&mut self, win: Window, atom: Atom, is_root: bool) {
+        if atom == self.ipc_atom_command {
+            match self.conn.get_text_property(win, atom) {
+                Ok(c) => self.handle_command(c, win),
+                Err(e) => debug!("Failed to get changed property {:?}", e),
+            }
+        }
+        // if atom ==  || atom == "_NET_WM_NAME" {
+        //     if let Ok(name) = self.conn.str_prop(id, atom) {
+        //         self.client_map.get_mut(&id).map(|c| c.set_name(&name));
+        //         run_hooks!(client_name_updated, self, id, &name, is_root);
+        //     }
+        // }
+    }
 
     fn handle_destroy_notify(&mut self, id: Window) {
         debug!("DESTROY_NOTIFY for {}", id);
@@ -214,17 +270,9 @@ impl WindowManager {
             return;
         }
 
-        // TODO: Use xcb_util::ewmh::get_wm_class
-        let wm_class = match self.conn.str_prop(id, self.conn.atoms.WM_CLASS) {
-            Ok(s) => s.split("\0").collect::<Vec<&str>>()[0].into(),
-            Err(_) => String::new(),
-        };
+        let wm_name = self.conn.get_wm_name(id).unwrap_or(String::new());
 
-        // TODO: Use xcb_util::ewmh::get_wm_name
-        let wm_name = match self.conn.str_prop(id, self.conn.atoms.WM_NAME) {
-            Ok(s) => s,
-            Err(_) => String::from("n/a"),
-        };
+        let wm_class = self.conn.get_wm_class(id).unwrap_or(String::new());
 
         // let floating = self.conn.window_should_float(id, self.floating_classes);
         // let wix = self.active_ws_index();
@@ -264,8 +312,7 @@ impl WindowManager {
         // let id = self.conn.focused_client();
         if let Some(id) = self.focused_client() {
             self.conn.delete_window(id);
-            // self.conn.send_client_event(id, "WM_DELETE_WINDOW").unwrap();
-            // self.conn.flush();
+            self.conn.flush();
 
             self.remove_client(id);
             // self.apply_layout(self.active_ws_index());
@@ -328,6 +375,21 @@ impl WindowManager {
 
         self.focused_client = Some(id);
         // run_hooks!(focus_change, self, id);
+    }
+
+    fn handle_command(&mut self, command: String, win: Window) {
+        let mut command: Vec<&str> = command.split(' ').collect();
+        let cmd = command.remove(0);
+        match cmd {
+            "bindkey" => {
+                let key_str = command.remove(0);
+                // let args_str = args.collect().join(' ');
+                self.keyman.bind_key(&self.conn, key_str, command);
+                self.conn.set_text_property(win, self.ipc_atom_state, ipc::IPC_STATE_SUCCESS);
+            }
+            _ => {
+            }
+        }
     }
 }
 
