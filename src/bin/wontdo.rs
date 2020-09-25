@@ -30,7 +30,7 @@ fn main() -> Result<()> {
         "bindkey"       => Command::BindKey,
         "unbindkey"     => Command::UnbindKey,
         "list_bindings" => Command::ListBindings,
-        "quit"          => Command::Quit,
+        "exit"          => Command::Exit,
         "reload"        => Command::Reload,
         "set"           => Command::Set,
         _               => return Err(anyhow!("Invalid command {}", cmd)),

@@ -56,6 +56,7 @@ pub struct WindowManager {
     // atoms: InternedAtoms,
     ipc_atom_command: Atom,
     ipc_atom_state: Atom,
+    running: bool,
 }
 
 impl WindowManager {
@@ -68,6 +69,7 @@ impl WindowManager {
 
         let mut keyman = KeyManager::new();
         keyman.set_default_bindings(&conn);
+        // bindings::set_default_bindings(&mut self.key_bindings, &self.conn);
         let mut wm = WindowManager {
             conn,
             config: Config::default(),
@@ -79,19 +81,20 @@ impl WindowManager {
             // atoms,
             ipc_atom_command,
             ipc_atom_state,
+            running: false,
         };
 
-        // bindings::set_default_bindings(&mut self.key_bindings, &self.conn);
 
         wm.detect_screens();
+        wm.conn.flush();
 
         Ok(wm)
     }
 
-
     // pub fn run(&mut self, mut bindings: KeyBindings) {
     pub fn run(&mut self) {
-        loop {
+        self.running = true;
+        while self.running {
             if let Some(event) = self.conn.wait_for_event() {
                 debug!("got XEvent: {:?}", event);
                 match event {
@@ -101,7 +104,7 @@ impl WindowManager {
                     XEvent::MapRequest { id, ignore } => self.handle_map_request(id, ignore),
                     // XEvent::Enter { id, rpt, wpt } => self.handle_enter_notify(id, rpt, wpt),
                     // XEvent::Leave { id, rpt, wpt } => self.handle_leave_notify(id, rpt, wpt),
-                    XEvent::Destroy { id } => self.handle_destroy_notify(id),
+                    XEvent::DestroyNotify { id } => self.handle_destroy_notify(id),
                     // XEvent::ScreenChange => self.handle_screen_change(),
                     // XEvent::RandrNotify => self.detect_screens(),
                     // XEvent::ConfigureNotify { id, r, is_root } => {
@@ -119,10 +122,16 @@ impl WindowManager {
                     _ => (),
                 }
                 // run_hooks!(event_handled, self,);
+                self.conn.flush();
             }
 
-            self.conn.flush();
         }
+    }
+
+    /// Shut down the WindowManager, running any required cleanup and exiting penrose
+    pub fn exit(&mut self) {
+        self.conn.cleanup();
+        self.running = false;
     }
 
     /// Reset the current known screens based on currently detected outputs
@@ -259,24 +268,24 @@ impl WindowManager {
     }
 
     fn handle_destroy_notify(&mut self, id: Window) {
-        debug!("DESTROY_NOTIFY for {}", id);
+        // debug!("DESTROY_NOTIFY for {}", id);
         self.remove_client(id);
         // self.apply_layout(self.active_ws_index());
     }
 
-    fn handle_map_request(&mut self, id: Window, override_redirect: bool) {
+    fn handle_map_request(&mut self, win: Window, override_redirect: bool) {
         // if override_redirect || self.client_map.contains_key(&id) {
         if override_redirect {
             return;
         }
 
-        let wm_name = self.conn.get_wm_name(id).unwrap_or(String::new());
+        let wm_name = self.conn.get_wm_name(win).unwrap_or(String::new());
 
-        let wm_class = self.conn.get_wm_class(id).unwrap_or(String::new());
+        let wm_class = self.conn.get_wm_class(win).unwrap_or(String::new());
 
         // let floating = self.conn.window_should_float(id, self.floating_classes);
         // let wix = self.active_ws_index();
-        let client = Client::new(id, wm_name, wm_class, false);
+        let client = Client::new(win, wm_name, wm_class, false);
         // let mut client = Client::new(id, wm_name, wm_class, wix, floating);
         // run_hooks!(new_client, self, &mut client);
 
@@ -284,15 +293,15 @@ impl WindowManager {
         //     self.add_client_to_workspace(wix, id);
         // }
 
-        self.clients.insert(id, client);
-        self.conn.mark_new_window(id);
+        self.clients.insert(win, client);
+        self.conn.mark_new_window(win);
         // self.conn.focus_client(id);
-        self.change_focus(id);
+        self.change_focus(Some(win));
 
         // self.conn.set_client_workspace(id, wix);
         // self.apply_layout(wix);
         // self.map_window_if_needed(id);
-        self.conn.map_window(id);
+        self.conn.map_window(win);
 
         // let s = self.screens.focused().unwrap();
         // self.conn.warp_cursor(Some(id), s);
@@ -309,32 +318,32 @@ impl WindowManager {
 
     /// Kill the focused client window.
     pub fn kill_client(&mut self) {
-        // let id = self.conn.focused_client();
-        if let Some(id) = self.focused_client() {
-            self.conn.delete_window(id);
-            self.conn.flush();
-
-            self.remove_client(id);
+        if let Some(win) = self.focused_client() {
+            self.conn.signal_delete_window(win);
             // self.apply_layout(self.active_ws_index());
         }
     }
 
-    fn remove_client(&mut self, id: Window) {
-        match self.clients.get(&id) {
+    fn remove_client(&mut self, win: Window) {
+        match self.clients.get(&win) {
             Some(client) => {
                 // self.workspaces
                 //     .get_mut(client.workspace())
                 //     .and_then(|ws| ws.remove_client(id));
-                self.clients.remove(&id).map(|c| {
+                self.clients.remove(&win).map(|c| {
                     debug!("removing ref to client {} ({})", c.id(), c.wm_class());
                 });
 
-                if self.focused_client == Some(id) {
-                    self.focused_client = None;
+                if self.focused_client() == Some(win) {
+                    if let Some(&win) = self.clients.keys().next() {
+                        self.change_focus(Some(win));
+                    } else {
+                        self.change_focus(None);
+                    }
                 }
                 // run_hooks!(remove_client, self, id);
             }
-            None => warn!("attempt to remove unknown client {}", id),
+            None => warn!("attempt to remove unknown client {}", win),
         }
     }
 
@@ -356,12 +365,15 @@ impl WindowManager {
     //     self.conn.set_client_border_color(id, color);
     // }
 
-    fn change_focus(&mut self, id: Window) {
+    fn change_focus(&mut self, win: Option<Window>) {
         // let prev_focused = self.focused_client().map(|c| c.id());
         // prev_focused.map(|id| self.client_lost_focus(id));
 
         // self.conn.set_client_border_color(id, self.focused_border);
-        self.conn.focus_client(id);
+        match win {
+            Some(win) => self.conn.focus_window(win),
+            None => self.conn.focus_nothing()
+        }
 
         // if let Some(wix) = self.workspace_index_for_client(id) {
         //     if let Some(ws) = self.workspaces.get_mut(wix) {
@@ -373,7 +385,7 @@ impl WindowManager {
         //     }
         // }
 
-        self.focused_client = Some(id);
+        self.focused_client = win;
         // run_hooks!(focus_change, self, id);
     }
 
@@ -387,7 +399,12 @@ impl WindowManager {
                 self.keyman.bind_key(&self.conn, key_str, command);
                 self.conn.set_text_property(win, self.ipc_atom_state, ipc::IPC_STATE_SUCCESS);
             }
+            "exit" => {
+                self.conn.set_text_property(win, self.ipc_atom_state, ipc::IPC_STATE_SUCCESS);
+                self.exit();
+            }
             _ => {
+                self.conn.set_text_property(win, self.ipc_atom_state, ipc::IPC_STATE_ERROR);
             }
         }
     }

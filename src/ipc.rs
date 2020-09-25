@@ -22,12 +22,13 @@ pub const IPC_STATE_ATOM: &str = "_WONTWM_IPC_STATE";
 pub const IPC_STATE_SERVER_READY: &str = "server_ready";
 pub const IPC_STATE_REPLY_READY: &str = "reply_ready";
 pub const IPC_STATE_SUCCESS: &str = "success";
+pub const IPC_STATE_ERROR: &str = "error";
 
 pub enum Command {
     BindKey,
     UnbindKey,
     ListBindings,
-    Quit,
+    Exit,
     Reload,
     Set,
     // Invalid,
@@ -73,8 +74,8 @@ impl IpcClient {
         icccm::set_wm_class_checked(raw_conn, ipc_win, IPC_WINDOW_CLASS, IPC_WINDOW_CLASS).request_check()?;
         conn.flush();
 
+        // Notify the wm that the WM_CLASS of the client IPC window is ready
         xcb::configure_window(raw_conn, ipc_win, &[(CONFIG_WINDOW_X, 0)]);
-        // TODO: ungrab somehow blocks, why?
         // xcb::ungrab_server_checked(raw_conn).request_check()?;
         // print!("Ungrabbed server");
 
@@ -118,27 +119,27 @@ impl IpcClient {
         Ok(())
     }
 
-    pub fn is_server_ready(&self) -> bool {
-        // debug!("checking server");
-        if let Ok(state) = self.conn.get_text_property(self.ipc_win, self.atom_state) {
-            // debug!("state: {:?}", state);
-            state == IPC_STATE_SERVER_READY
-        } else {
-            false
-        }
+    // pub fn is_server_ready(&self) -> bool {
+    //     // debug!("checking server");
+    //     if let Ok(state) = self.conn.get_text_property(self.ipc_win, self.atom_state) {
+    //         // debug!("state: {:?}", state);
+    //         state == IPC_STATE_SERVER_READY
+    //     } else {
+    //         false
+    //     }
         
-    }
+    // }
 
-    pub fn is_reply_ready(&self) -> bool {
-        // debug!("checking server");
-        if let Ok(state) = self.conn.get_text_property(self.ipc_win, self.atom_state) {
-            // debug!("state: {:?}", state);
-            state == IPC_STATE_REPLY_READY
-        } else {
-            false
-        }
+    // pub fn is_reply_ready(&self) -> bool {
+    //     // debug!("checking server");
+    //     if let Ok(state) = self.conn.get_text_property(self.ipc_win, self.atom_state) {
+    //         // debug!("state: {:?}", state);
+    //         state == IPC_STATE_REPLY_READY
+    //     } else {
+    //         false
+    //     }
         
-    }
+    // }
 
     pub fn get_reply(&self) -> Result<String> {
         loop {
@@ -154,6 +155,9 @@ impl IpcClient {
                                 IPC_STATE_SUCCESS => return Ok(IPC_STATE_SUCCESS.to_string()),
                                 IPC_STATE_REPLY_READY => {
                                     return self.conn.get_text_property(id, self.atom_command);
+                                }
+                                IPC_STATE_ERROR => {
+                                    return Ok(IPC_STATE_ERROR.to_string())
                                 }
                                 _ => return Err(anyhow!("Got an invalid state")),
                             }

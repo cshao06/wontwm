@@ -20,6 +20,7 @@ const NEW_WINDOW_MASK: &[(u32, u32)] = &[(
     xcb::EVENT_MASK_ENTER_WINDOW | xcb::EVENT_MASK_LEAVE_WINDOW | xcb::EVENT_MASK_PROPERTY_CHANGE,
 )];
 const INPUT_FOCUS_PARENT: u8 = xcb::INPUT_FOCUS_PARENT as u8;
+const INPUT_FOCUS_POINTER_ROOT: u8 = xcb::INPUT_FOCUS_POINTER_ROOT as u8;
 const PROP_MODE_REPLACE: u8 = xcb::PROP_MODE_REPLACE as u8;
 
 const CONFIG_WINDOW_BORDER_WIDTH: u16 = xcb::CONFIG_WINDOW_BORDER_WIDTH as u16;
@@ -242,9 +243,9 @@ pub enum XEvent {
     //     id: Window,
     // },
 
-    /// MapNotifyEvent
+    /// DestroyNotifyEvent
     /// xcb docs: https://www.mankier.com/3/xcb_destroy_notify_event_t
-    Destroy {
+    DestroyNotify {
         /// The ID of the window being destroyed
         id: Window,
     },
@@ -364,8 +365,7 @@ impl XcbConnection {
         xcb::change_window_attributes_checked(&self.conn, self.root, ROOT_EVENT_MASK)
             .request_check()
             .context("Could not register SUBSTRUCTURE_NOTIFY/REDIRECT")?;
-        // TODO: necessary?
-        self.conn.flush();
+        // self.conn.flush();
         Ok(())
     }
 
@@ -384,10 +384,10 @@ impl XcbConnection {
             GRAB_MODE_ASYNC, // don't lock pointer input while grabbing
             GRAB_MODE_ASYNC, // don't lock keyboard input while grabbing
         );
-
+        self.conn.flush();
     }
 
-    pub fn grab_button() {
+    pub fn grab_button(&self) {
         // TODO: this needs to be more configurable by the user
         // for mouse_button in &[1, 3] {
         //     // xcb docs: https://www.mankier.com/3/xcb_grab_button
@@ -404,6 +404,7 @@ impl XcbConnection {
         //         xcb::MOD_MASK_4 as u16, // modifiers to grab
         //     );
         // }
+        // self.conn.flush();
 
     }
 
@@ -415,40 +416,22 @@ impl XcbConnection {
         Ok(())
     }
 
-    pub fn focus_client(&self, id: Window) {
-        // xcb docs: https://www.mankier.com/3/xcb_set_input_focus
-        xcb::set_input_focus(
-            &self.conn,         // xcb connection to X11
-            INPUT_FOCUS_PARENT, // focus the parent when focus is lost
-            // INPUT_FOCUS_POINTER_ROOT
-            id,                 // window to focus
-            xcb::CURRENT_TIME,  // current time to avoid network race conditions (0 == current time)
-        );
-        ewmh::set_active_window(&self.conn, self.preferred_screen, id);
+    /// Unsets EWMH's _NET_ACTIVE_WINDOW to indicate there is no active window.
+    pub fn focus_nothing(&self) {
+        ewmh::set_active_window(&self.conn, self.preferred_screen, xcb::NONE);
     }
 
-    // pub fn focus_client(&self, id: Window) {
-    //     let prop = self.known_atom(Atom::NetActiveWindow);
-
-    //     // xcb docs: https://www.mankier.com/3/xcb_set_input_focus
-    //     xcb::set_input_focus(
-    //         &self.conn,         // xcb connection to X11
-    //         INPUT_FOCUS_PARENT, // focus the parent when focus is lost
-    //         id,                 // window to focus
-    //         0,                  // current time to avoid network race conditions (0 == current time)
-    //     );
-
-    //     // xcb docs: https://www.mankier.com/3/xcb_change_property
-    //     xcb::change_property(
-    //         &self.conn,        // xcb connection to X11
-    //         PROP_MODE_REPLACE, // discard current prop and replace
-    //         self.root,         // window to change prop on
-    //         prop,              // prop to change
-    //         ATOM_WINDOW,       // type of prop
-    //         32,                // data format (8/16/32-bit)
-    //         &[id],             // data
-    //     );
-    // }
+    pub fn focus_window(&self, id: Window) {
+        xcb::set_input_focus(
+            &self.conn,         // xcb connection to X11
+            // INPUT_FOCUS_PARENT, // focus the parent when focus is lost
+            INPUT_FOCUS_POINTER_ROOT,
+            id,                 // window to focus
+            xcb::CURRENT_TIME,  // current time to avoid network race conditions
+        );
+        ewmh::set_active_window(&self.conn, self.preferred_screen, id);
+        // self.conn.flush();
+    }
 
     // - Release all of the keybindings we are holding on to
     // - destroy the check window
@@ -462,11 +445,9 @@ impl XcbConnection {
             xcb::MOD_MASK_ANY as u16,
         );
         // xcb::destroy_window(&self.conn, self.check_win);
-        // xcb::delete_property(
-        //     &self.conn,
-        //     self.root,
-        //     self.known_atom(Atom::NetActiveWindow),
-        // );
+        // xcb::delete_property(&self.conn, self.root, self.conn.ACTIVE_WINDOW());
+        self.focus_nothing();
+        self.conn.flush();
     }
 
     pub fn get_wm_name(&self, id: Window) -> Result<String> {
@@ -497,6 +478,7 @@ impl XcbConnection {
             8,                                 // data format (8/16/32-bit)
             data.as_bytes(),                // data
         );
+        // self.conn.flush();
     }
 
     // fn atom_prop(&self, id: Window, atom: Atom) -> Result<u32> {
@@ -608,7 +590,7 @@ impl XcbConnection {
 
                 xcb::DESTROY_NOTIFY => {
                     let e: &xcb::MapNotifyEvent = unsafe { xcb::cast_event(&event) };
-                    Some(XEvent::Destroy { id: e.window() })
+                    Some(XEvent::DestroyNotify { id: e.window() })
                 }
 
                 // xcb::randr::SCREEN_CHANGE_NOTIFY => Some(XEvent::ScreenChange),
@@ -688,7 +670,8 @@ impl XcbConnection {
 
     pub fn mark_new_window(&self, id: Window) {
         // xcb docs: https://www.mankier.com/3/xcb_change_window_attributes
-        xcb::change_window_attributes(&self.conn, id, NEW_WINDOW_MASK);
+        // TODO: check or flush?
+        xcb::change_window_attributes_checked(&self.conn, id, NEW_WINDOW_MASK);
     }
 
     pub fn map_window(&self, id: Window) {
@@ -735,9 +718,8 @@ impl XcbConnection {
 
     fn send_client_event(&self, id: Window, atom: Atom) -> Result<()> {
         // TODO: use ewmh
-        let wm_protocols = self.conn.WM_PROTOCOLS();
         let data = xcb::ClientMessageData::from_data32([atom, xcb::CURRENT_TIME, 0, 0, 0]);
-        let event = xcb::ClientMessageEvent::new(32, id, wm_protocols, data);
+        let event = xcb::ClientMessageEvent::new(32, id, self.conn.WM_PROTOCOLS(), data);
         xcb::send_event(&self.conn, false, id, xcb::EVENT_MASK_NO_EVENT, &event);
         Ok(())
     }
@@ -747,7 +729,7 @@ impl XcbConnection {
     /// The window will be closed gracefully using the ICCCM WM_DELETE_WINDOW
     /// protocol if it is supported.
     // TODO: query supported protocols everytime?
-    pub fn delete_window(&self, id: Window) {
+    pub fn signal_delete_window(&self, id: Window) {
         let atom = self.atoms.WM_DELETE_WINDOW;
         let has_wm_delete_window = self
             .get_wm_protocols(id)
@@ -777,6 +759,7 @@ impl XcbConnection {
             info!("Closing window {} using xcb::destroy_window()", id);
             xcb::destroy_window(&self.conn, id);
         }
+        // self.conn.flush();
     }
 }
 

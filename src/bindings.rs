@@ -35,13 +35,14 @@ struct UserFmtBinding {
     key: &'static str,
     // action: &'static str,
     action: &'static str,
-    args: Option<&'static str>,
+    // args: Option<&'static str>,
 }
 
 static DEFAULT_BINDINGS: &'static [UserFmtBinding] = &[
-    UserFmtBinding {key: "S-q",      action: "kill_client", args: None},
-    UserFmtBinding {key: "S-Return", action: "exec", args: Some("alacritty")},
-    UserFmtBinding {key: "S-e",      action: "exec", args: Some("spacefm")},
+    UserFmtBinding {key: "S-q",      action: "kill_client"},
+    UserFmtBinding {key: "S-x",      action: "exit"},
+    UserFmtBinding {key: "S-Return", action: "exec alacritty"},
+    UserFmtBinding {key: "S-e",      action: "exec spacefm"},
 ];
 
 pub struct KeyManager {
@@ -74,51 +75,7 @@ impl KeyManager {
     pub fn set_default_bindings(&mut self, conn: &XcbConnection) {
     // pub fn set_default_bindings(bindings: &mut KeyBindings, conn: &XcbConnection) {
         for binding in DEFAULT_BINDINGS.iter() {
-            match parse_key_binding(binding.key, &self.keycodes) {
-                None => panic!("invalid key binding: {}", binding.key),
-                // UserFmtBinding {key: "S-Return", action: 
-                //     Box::new(move |_: &mut WindowManager| {
-                //         spawn("alacritty");
-                //     }) as Action
-                // },
-                Some(key_code) => {
-                    // let action = &binding.action;
-                    // let mut iter = action.split_whitespace();
-                    if binding.action == "exec" {
-                        self.bindings.insert(key_code, 
-                        // bindings.insert(key_code, 
-                            // Box::new(move |ref mut wm| {
-                            Rc::new(move |ref mut _wm| {
-                                spawn(binding.args.unwrap());
-                            })
-                        );
-                    } else {
-                        // debug!("inserting kill client");
-                        // std::thread::sleep(std::time::Duration::from_millis(10));
-                        self.bindings.insert(key_code, 
-                        // bindings.insert(key_code, 
-                            // Box::new(move |ref mut wm| {
-                            Rc::new(move |ref mut wm| {
-                                wm.kill_client();
-                            })
-                        );
-                    }
-                    // match iter.next() {
-                    //     Some(s) => if s == "exec" {spawn("alacritty");},
-                    //     None => {
-                    //         debug!("keypress error");
-                    //         return;
-                    //     }
-                    // }
-
-                    // self.bindings.insert(key_code, binding.action.to_string()),
-                },
-            };
-        }
-        // debug!("Map: {:?}", self.bindings.keys());
-        for key in self.bindings.keys() {
-        // for key in bindings.keys() {
-            conn.grab_key(key);
+            self.bind_key(conn, binding.key, binding.action.split(' ').collect());
         }
     }
 
@@ -134,25 +91,37 @@ impl KeyManager {
                 Some(key_code) => {
                     debug!("key: {:?}", key_code);
                     let action_str = action.remove(0);
-                    // remove trailing nul
-                    if action_str == "exec" {
-                        let action = action.join(" ");
-                        debug!("action: {:?}", action);
-                        self.bindings.insert(key_code, 
-                            Rc::new(move |ref mut _wm| {
-                                spawn(action.trim_end_matches(char::from(0)));
-                                // spawn(action);
-                            })
-                        );
-                        debug!("Map: {:?}", self.bindings.keys());
-                    } else {
-                        self.bindings.insert(key_code, 
-                            Rc::new(move |ref mut wm| {
-                                wm.kill_client();
-                            })
-                        );
+                    match action_str {
+                        "exec" => {
+                            let action = action.join(" ");
+                            debug!("action: {:?}", action);
+                            self.bindings.insert(key_code, 
+                                Rc::new(move |ref mut _wm| {
+                                    // TODO: fix trailing 0
+                                    spawn(action.trim_end_matches(char::from(0)));
+                                    // spawn(action);
+                                })
+                            );
+                        }
+                        "kill_client" => {
+                            self.bindings.insert(key_code, 
+                                Rc::new(move |ref mut wm| {
+                                    wm.kill_client();
+                                })
+                            );
+                        }
+                        "exit" => {
+                            self.bindings.insert(key_code, 
+                                Rc::new(move |ref mut wm| {
+                                    wm.exit();
+                                })
+                            );
+                        }
+                        _ => return
+
                     }
                     conn.grab_key(&key_code);
+                    debug!("Map: {:?}", self.bindings.keys());
                 },
             }
     }
