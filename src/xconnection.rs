@@ -19,7 +19,7 @@ const NEW_WINDOW_MASK: &[(u32, u32)] = &[(
     xcb::CW_EVENT_MASK,
     xcb::EVENT_MASK_ENTER_WINDOW | xcb::EVENT_MASK_LEAVE_WINDOW | xcb::EVENT_MASK_PROPERTY_CHANGE,
 )];
-const INPUT_FOCUS_PARENT: u8 = xcb::INPUT_FOCUS_PARENT as u8;
+// const INPUT_FOCUS_PARENT: u8 = xcb::INPUT_FOCUS_PARENT as u8;
 const INPUT_FOCUS_POINTER_ROOT: u8 = xcb::INPUT_FOCUS_POINTER_ROOT as u8;
 const PROP_MODE_REPLACE: u8 = xcb::PROP_MODE_REPLACE as u8;
 
@@ -28,7 +28,10 @@ const CONFIG_WINDOW_HEIGHT: u16 = xcb::CONFIG_WINDOW_HEIGHT as u16;
 const CONFIG_WINDOW_WIDTH: u16 = xcb::CONFIG_WINDOW_WIDTH as u16;
 const CONFIG_WINDOW_X: u16 = xcb::CONFIG_WINDOW_X as u16;
 const CONFIG_WINDOW_Y: u16 = xcb::CONFIG_WINDOW_Y as u16;
+const CONFIG_WINDOW_STACK_MODE: u16 = xcb::CONFIG_WINDOW_STACK_MODE as u16;
+const CONFIG_WINDOW_STACK_ABOVE: u32 = xcb::STACK_MODE_ABOVE as u32;
 
+// TODO: use strum?
 macro_rules! atoms {
     ( $( $name:ident ),+ ) => {
         #[allow(non_snake_case)]
@@ -83,12 +86,33 @@ pub struct Point {
     pub y: u32,
 }
 
-impl Point {
-    /// Create a new Point.
-    pub fn new(x: u32, y: u32) -> Point {
-        Point { x, y }
-    }
+// impl Point {
+//     /// Create a new Point.
+//     pub fn new(x: u32, y: u32) -> Point {
+//         Point { x, y }
+//     }
+// }
+
+/// An X window / screen position: top left corner + extent
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct Region {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
 }
+
+/// X window border kind
+#[derive(Debug)]
+pub enum Border {
+    /// window is urgent
+    Urgent,
+    /// window currently has focus
+    Focused,
+    /// window does not have focus
+    Unfocused,
+}
+
 
 /**
  * Wrapper around the low level XCB event types that require casting to work with.
@@ -377,7 +401,7 @@ impl XcbConnection {
         // xcb docs: https://www.mankier.com/3/xcb_grab_key
         xcb::grab_key(
             &self.conn,      // xcb connection to X11
-            false,           // don't pass grabbed events through to the client
+            false,           // don't pass grabbed events through to the window
             self.root,       // the window to grab: in this case the root window
             key.mod_mask,    // modifiers to grab
             key.code,        // keycode to grab
@@ -393,9 +417,9 @@ impl XcbConnection {
         //     // xcb docs: https://www.mankier.com/3/xcb_grab_button
         //     xcb::grab_button(
         //         &self.conn,             // xcb connection to X11
-        //         false,                  // don't pass grabbed events through to the client
+        //         false,                  // don't pass grabbed events through to the window 
         //         self.root,              // the window to grab: in this case the root window
-        //         MOUSE_MASK,             // which events are reported to the client
+        //         MOUSE_MASK,             // which events are reported to the window
         //         GRAB_MODE_ASYNC,        // don't lock pointer input while grabbing
         //         GRAB_MODE_ASYNC,        // don't lock keyboard input while grabbing
         //         xcb::NONE,              // don't confine the cursor to a specific window
@@ -669,7 +693,6 @@ impl XcbConnection {
     }
 
     pub fn mark_new_window(&self, id: Window) {
-        // xcb docs: https://www.mankier.com/3/xcb_change_window_attributes
         // TODO: check or flush?
         xcb::change_window_attributes_checked(&self.conn, id, NEW_WINDOW_MASK);
     }
@@ -680,6 +703,31 @@ impl XcbConnection {
 
     pub fn unmap_window(&self, id: Window) {
         xcb::unmap_window(&self.conn, id);
+    }
+
+    pub fn configure_window(&self, win: Window, reg: Option<Region>, border_width: Option<u32>, stack_above: Option<bool>) {
+        let mut args = vec![];
+        if let Some(r) = reg {
+            args.append(&mut vec![
+                (CONFIG_WINDOW_X, r.x),
+                (CONFIG_WINDOW_Y, r.y),
+                (CONFIG_WINDOW_WIDTH, r.w),
+                (CONFIG_WINDOW_HEIGHT, r.h)
+            ])
+        }
+        if let Some(bw) = border_width {
+            args.push((CONFIG_WINDOW_BORDER_WIDTH, bw));
+        }
+        if let Some(sa) = stack_above {
+            if sa {
+                args.push((CONFIG_WINDOW_STACK_MODE, CONFIG_WINDOW_STACK_ABOVE));
+            }
+        }
+        xcb::configure_window(&self.conn, win, &args);
+    }
+
+    pub fn set_window_border_color(&self, win: Window, color: u32) {
+        xcb::change_window_attributes(&self.conn, win, &[(xcb::CW_BORDER_PIXEL, color)]);
     }
 
     // fn intern_atom(&self, atom: &str) -> Result<u32> {
@@ -716,11 +764,11 @@ impl XcbConnection {
         Ok(reply.atoms().to_vec())
     }
 
-    fn send_client_event(&self, id: Window, atom: Atom) -> Result<()> {
+    fn send_client_message_event(&self, win: Window, atom: Atom) -> Result<()> {
         // TODO: use ewmh
         let data = xcb::ClientMessageData::from_data32([atom, xcb::CURRENT_TIME, 0, 0, 0]);
-        let event = xcb::ClientMessageEvent::new(32, id, self.conn.WM_PROTOCOLS(), data);
-        xcb::send_event(&self.conn, false, id, xcb::EVENT_MASK_NO_EVENT, &event);
+        let event = xcb::ClientMessageEvent::new(32, win, self.conn.WM_PROTOCOLS(), data);
+        xcb::send_event(&self.conn, false, win, xcb::EVENT_MASK_NO_EVENT, &event);
         Ok(())
     }
 
@@ -738,7 +786,7 @@ impl XcbConnection {
 
         if has_wm_delete_window {
             info!("Closing window {} using WM_DELETE", id);
-            self.send_client_event(id, self.atoms.WM_DELETE_WINDOW);
+            self.send_client_message_event(id, self.atoms.WM_DELETE_WINDOW);
             // let data = xcb::ClientMessageData::from_data32([
             //     atom,
             //     xcb::CURRENT_TIME,

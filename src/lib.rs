@@ -11,7 +11,7 @@ pub mod ipc;
 
 mod bindings;
 mod xconnection;
-mod client;
+mod window;
 mod events;
 
 pub use xconnection::XcbConnection;

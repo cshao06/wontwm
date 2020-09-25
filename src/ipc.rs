@@ -171,6 +171,58 @@ impl IpcClient {
 
 }
 
-// IPC_ATOM_COMMAND "_"__NAME_UPPERCASE__"_CLIENT_COMMAND"
-// IPC_ATOM_STATE "_"__NAME_UPPERCASE__"_STATE"
-// IPC_ATOM_INSETS "_"__NAME_UPPERCASE__"_INSETS"
+pub struct IpcServer<'a> {
+    conn: &'a XcbConnection,
+    atom_command: Atom,
+    atom_state: Atom,
+}
+
+impl<'a> IpcServer<'a> {
+    pub fn new(conn: &XcbConnection) -> Result<IpcServer> {
+
+        let atom_command = conn.intern_atom(IPC_COMMAND_ATOM)?;
+        let atom_state = conn.intern_atom(IPC_STATE_ATOM)?;
+        Ok(IpcServer {
+            conn,
+            atom_command,
+            atom_state,
+        })
+    }
+
+    pub fn is_ipc_client(&self, win: Window) -> bool {
+        if let Ok(class) = self.conn.get_wm_class(win) {
+            if class == IPC_WINDOW_CLASS {
+                return true
+            }
+        }
+        // debug!("class: {}", c);
+        // debug!("handle_configure_request: Failed to get window class {:?}", e)
+        false
+    }
+
+    pub fn listen_client(&self, win: Window) {
+        // TODO: handle error
+        self.conn.register_events(win, xcb::EVENT_MASK_PROPERTY_CHANGE);
+        self.conn.set_text_property(win, self.atom_state, IPC_STATE_SERVER_READY);
+        debug!("Ready for property change on the ipc client window");
+    }
+
+    pub fn get_command(&self, win: Window, atom: Atom) -> Option<String> {
+        if atom == self.atom_command {
+            match self.conn.get_text_property(win, atom) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    debug!("Failed to get ipc command property {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+
+    pub fn send_reply(&self, win: Window, data: &str) {
+        self.conn.set_text_property(win, self.atom_state, data);
+    }
+}

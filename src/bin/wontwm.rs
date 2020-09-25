@@ -1,7 +1,7 @@
 /// A default 'anyhow' based result type
 type Result<T> = anyhow::Result<T>;
 // pub type Result<T> = std::result::Result<T, Error>;
-use wontwm::WindowManager;
+use wontwm::{WindowManager, XcbConnection};
 use simplelog::{LevelFilter, SimpleLogger};
 
 fn main() -> Result<()> {
@@ -11,8 +11,8 @@ fn main() -> Result<()> {
 
     // let mut config = Config::default();
 
-    // let conn = XcbConnection::new()?;
-    let mut wm = WindowManager::new()?;
+    let conn = XcbConnection::new()?;
+    let mut wm = WindowManager::new(&conn)?;
 
     // spawn(format!("{}/bin/scripts/penrose-startup.sh", home));
     // wm.grab_keys_and_run(key_bindings);

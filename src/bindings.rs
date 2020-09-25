@@ -39,43 +39,36 @@ struct UserFmtBinding {
 }
 
 static DEFAULT_BINDINGS: &'static [UserFmtBinding] = &[
-    UserFmtBinding {key: "S-q",      action: "kill_client"},
+    UserFmtBinding {key: "S-q",      action: "kill_window"},
     UserFmtBinding {key: "S-x",      action: "exit"},
     UserFmtBinding {key: "S-Return", action: "exec alacritty"},
     UserFmtBinding {key: "S-e",      action: "exec spacefm"},
 ];
 
-pub struct KeyManager {
+pub struct Bindings<'a> {
     bindings: KeyBindings,
     keycodes: KeymapTable,
-    // conn: &'a XcbConnection,
+    conn: &'a XcbConnection,
 }
 // pub struct KeyManager<T: &XConn> {
 //     bindings: KeyBindings,
 //     conn: T,
 // }
 
-impl KeyManager {
-    pub fn new() -> Self {
-        // let km = KeyManager {
-        KeyManager {
+impl<'a> Bindings<'a> {
+    pub fn new(conn: &'a XcbConnection) -> Self {
+        let mut bindings = Bindings {
             bindings: KeyBindings::new(),
             keycodes: keycodes_from_xmodmap(),
-        }
-        // };
-        // default_bindings = [
-        //     UserFmtBinding {key: "M-Return", action: "exec alacritty"},
-        //     UserFmtBinding {key: "M-q", action: "close_window"},
-        // ];
-        // km
+            conn,
+        };
+        bindings.set_default_bindings();
+        bindings
     }
 
-    // pub fn set_default_bindings(&mut self, conn: &impl XConn) {
-    // TODO: combine with new()
-    pub fn set_default_bindings(&mut self, conn: &XcbConnection) {
-    // pub fn set_default_bindings(bindings: &mut KeyBindings, conn: &XcbConnection) {
+    pub fn set_default_bindings(&mut self) {
         for binding in DEFAULT_BINDINGS.iter() {
-            self.bind_key(conn, binding.key, binding.action.split(' ').collect());
+            self.bind_key(binding.key, binding.action.split_whitespace().collect());
         }
     }
 
@@ -83,8 +76,7 @@ impl KeyManager {
         self.bindings.get(key).cloned()
     }
 
-    // pub fn bind_key(&mut self, key: &str, mut action: Vec<&'static str>) {
-    pub fn bind_key(&mut self, conn: &XcbConnection, key: &str, mut action: Vec<&str>) {
+    pub fn bind_key(&mut self, key: &str, mut action: Vec<&str>) {
 
             match parse_key_binding(key, &self.keycodes) {
                 None => panic!("invalid key binding: {}", key),
@@ -103,10 +95,10 @@ impl KeyManager {
                                 })
                             );
                         }
-                        "kill_client" => {
+                        "kill_window" => {
                             self.bindings.insert(key_code, 
                                 Rc::new(move |ref mut wm| {
-                                    wm.kill_client();
+                                    wm.kill_focused();
                                 })
                             );
                         }
@@ -120,7 +112,7 @@ impl KeyManager {
                         _ => return
 
                     }
-                    conn.grab_key(&key_code);
+                    self.conn.grab_key(&key_code);
                     debug!("Map: {:?}", self.bindings.keys());
                 },
             }

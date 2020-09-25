@@ -1,13 +1,13 @@
 use xcb::Window;
 
 /**
- * Meta-data around a client window that we are handling.
+ * Meta-data around a window that we are handling.
  *
- * Primarily state flags and information used when determining which clients
+ * Primarily state flags and information used when determining which windows
  * to show for a given monitor and how they are tiled.
  */
 #[derive(Debug, PartialEq, Clone)]
-pub struct Client {
+pub struct WindowInfo {
     id: Window,
     wm_name: String,
     wm_class: String,
@@ -22,16 +22,16 @@ pub struct Client {
     // wm_managed: bool,
 }
 
-impl Client {
-    /// Track a new client window on a specific workspace
+impl WindowInfo {
+    /// Track a new window on a specific workspace
     pub fn new(
         id: Window,
         wm_name: String,
         wm_class: String,
         // workspace: usize,
         floating: bool,
-    ) -> Client {
-        Client {
+    ) -> WindowInfo {
+        WindowInfo {
             id,
             wm_name,
             wm_class,
@@ -43,12 +43,12 @@ impl Client {
         }
     }
 
-    /// The X window ID of this client
+    /// The X window ID of this window
     pub fn id(&self) -> Window {
         self.id
     }
 
-    /// The WM_CLASS property of this client
+    /// The WM_CLASS property of this window
     pub fn wm_class(&self) -> &str {
         &self.wm_class
     }
