@@ -1,4 +1,5 @@
 use xcb::Window;
+use crate::wm::TagId;
 
 /**
  * Meta-data around a window that we are handling.
@@ -11,6 +12,7 @@ pub struct WindowInfo {
     id: Window,
     wm_name: String,
     wm_class: String,
+    tag: TagId,
     // workspace: usize,
     // state flags
     floating: bool,
@@ -28,6 +30,7 @@ impl WindowInfo {
         id: Window,
         wm_name: String,
         wm_class: String,
+        tag: TagId,
         // workspace: usize,
         floating: bool,
     ) -> WindowInfo {
@@ -35,6 +38,7 @@ impl WindowInfo {
             id,
             wm_name,
             wm_class,
+            tag,
             // workspace,
             floating,
             fullscreen: false,
@@ -51,6 +55,10 @@ impl WindowInfo {
     /// The WM_CLASS property of this window
     pub fn wm_class(&self) -> &str {
         &self.wm_class
+    }
+
+    pub fn tag(&self) -> TagId {
+        self.tag
     }
 }
 

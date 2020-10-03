@@ -13,6 +13,9 @@ mod bindings;
 mod xconnection;
 mod window;
 mod events;
+mod workspace;
+mod view;
+mod tag;
 
 pub use xconnection::XcbConnection;
 pub use wm::WindowManager;

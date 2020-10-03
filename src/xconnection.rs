@@ -1,7 +1,7 @@
 // use std::{cell::Cell, collections::HashMap, convert::TryFrom, convert::TryInto};
 use anyhow::{Result, Context, anyhow};
 
-use xcb::{Window, Atom};
+use xcb::{Window, Atom, xinerama, randr};
 use xcb_util::{ewmh, icccm};
 
 // Mask out the most significant bit, which indicates if it's a send_event
@@ -86,20 +86,32 @@ pub struct Point {
     pub y: u32,
 }
 
-// impl Point {
-//     /// Create a new Point.
-//     pub fn new(x: u32, y: u32) -> Point {
-//         Point { x, y }
-//     }
-// }
+impl Point {
+    /// Create a new Point.
+    pub fn new(x: u32, y: u32) -> Point {
+        Point { x, y }
+    }
+}
 
 /// An X window / screen position: top left corner + extent
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct Region {
-    x: u32,
-    y: u32,
+pub struct Rectangle {
+    x: i32,
+    y: i32,
     w: u32,
     h: u32,
+}
+
+impl Rectangle {
+    /// Create a new Rectangle.
+    pub fn new(x: i32, y: i32, w: u32, h: u32) -> Rectangle {
+        Rectangle { x, y, w, h }
+    }
+
+    /// Destructure this Rectangle into its component values (x, y, w, h).
+    pub fn values(&self) -> (i32, i32, u32, u32) {
+        (self.x, self.y, self.w, self.h)
+    }
 }
 
 /// X window border kind
@@ -285,7 +297,7 @@ pub enum XEvent {
     //     /// The ID of the window that had a property changed
     //     id: Window,
     //     /// The new window size
-    //     r: Region,
+    //     r: Rectangle,
     //     /// Is this window the root window?
     //     is_root: bool,
     // },
@@ -328,9 +340,11 @@ pub struct XcbConnection {
     // randr_base: u8,
 }
 
+// TODO: implement deref
 impl XcbConnection {
     pub fn new() -> Result<XcbConnection> {
-        let (conn, preferred_screen) = xcb::Connection::connect(None).context(format!("Unable to connection to X server"))?;
+        let (conn, preferred_screen) = xcb::Connection::connect(None)
+            .context("Unable to connection to X server")?;
         //TODO: handle error using anyhow
         let conn = ewmh::Connection::connect(conn).map_err(|(e, _)| e)?;
         // let root = conn
@@ -344,7 +358,7 @@ impl XcbConnection {
             .get_setup()
             .roots()
             .nth(preferred_screen as usize)
-            .context(format!("Unable to get handle for the preferred screen"))?
+            .context("Unable to get the root window of the preferred screen")?
             .root();
 
         let atoms = InternedAtoms::new(&conn).context("Failed to intern atoms")?;
@@ -623,7 +637,7 @@ impl XcbConnection {
                 //     let e: &xcb::ConfigureNotifyEvent = unsafe { xcb::cast_event(&event) };
                 //     Some(XEvent::ConfigureNotify {
                 //         id: e.window(),
-                //         r: Region::new(
+                //         r: Rectangle::new(
                 //             e.x() as u32,
                 //             e.y() as u32,
                 //             e.width() as u32,
@@ -692,31 +706,31 @@ impl XcbConnection {
         })
     }
 
-    pub fn mark_new_window(&self, id: Window) {
+    pub fn mark_new_window(&self, win: Window) {
         // TODO: check or flush?
-        xcb::change_window_attributes_checked(&self.conn, id, NEW_WINDOW_MASK);
+        xcb::change_window_attributes_checked(&self.conn, win, NEW_WINDOW_MASK);
     }
 
-    pub fn map_window(&self, id: Window) {
-        xcb::map_window(&self.conn, id);
+    pub fn map_window(&self, win: Window) {
+        xcb::map_window(&self.conn, win);
     }
 
-    pub fn unmap_window(&self, id: Window) {
-        xcb::unmap_window(&self.conn, id);
+    pub fn unmap_window(&self, win: Window) {
+        xcb::unmap_window(&self.conn, win);
     }
 
-    pub fn configure_window(&self, win: Window, reg: Option<Region>, border_width: Option<u32>, stack_above: Option<bool>) {
+    pub fn configure_window(&self, win: Window, region: Option<Rectangle>, border_width: Option<u32>, stack_above: Option<bool>) {
         let mut args = vec![];
-        if let Some(r) = reg {
+        if let Some(r) = region {
             args.append(&mut vec![
-                (CONFIG_WINDOW_X, r.x),
-                (CONFIG_WINDOW_Y, r.y),
-                (CONFIG_WINDOW_WIDTH, r.w),
-                (CONFIG_WINDOW_HEIGHT, r.h)
+                (CONFIG_WINDOW_X, r.x as u32),
+                (CONFIG_WINDOW_Y, r.y as u32),
+                (CONFIG_WINDOW_WIDTH, r.w as u32),
+                (CONFIG_WINDOW_HEIGHT, r.h as u32)
             ])
         }
         if let Some(bw) = border_width {
-            args.push((CONFIG_WINDOW_BORDER_WIDTH, bw));
+            args.push((CONFIG_WINDOW_BORDER_WIDTH, bw as u32));
         }
         if let Some(sa) = stack_above {
             if sa {
@@ -809,5 +823,34 @@ impl XcbConnection {
         }
         // self.conn.flush();
     }
+
+    pub fn get_xinerama_screens(&self, ) -> (u32, xinerama::ScreenInfoIterator) {
+        let screens = xinerama::query_screens(&self.conn)
+            .get_reply()
+            .context("Xinerama query screens error")
+            .unwrap();
+        (screens.number(), screens.screen_info())
+    }
+
+    pub fn get_randr_monitors(&self) -> Vec<Rectangle> {
+        // TODO: get_monitors is not available in the xcb rust binding yet
+        // let monitors = randr::get_monitors();
+
+        let resources = randr::get_screen_resources(&self.conn, self.root)
+            .get_reply()
+            .context("Failed to read randr screen resources")
+            .unwrap();
+        // TODO: why 0 works for timestamp in get_crtc_info()?
+        resources.crtcs()
+            .iter()
+            .flat_map(|c| xcb::randr::get_crtc_info(&self.conn, *c, 0).get_reply())
+            .map(|c| Rectangle::new(c.x() as i32, c.y() as i32, c.width() as u32, c.height() as u32) )
+            .filter(|r| {
+                let (_, _, w, _) = r.values();
+                w > 0
+            })
+            .collect()
+    }
+
 }
 

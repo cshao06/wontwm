@@ -6,14 +6,16 @@ killall Xephyr
 cargo build
 
 CUR_DIR="$(dirname $(readlink -f $0))"
-SCREEN_SIZE=${SCREEN_SIZE:-800x600}
+# SCREEN_SIZE=${SCREEN_SIZE:-800x600}
+SCREEN_SIZE=${SCREEN_SIZE:-1280x720}
 XDISPLAY=${XDISPLAY:-:1}
 # EXAMPLE=${EXAMPLE:-local_test}
 # APP=${APP:-st}
 APP=${APP:-alacritty}
 
-# Xephyr +extension RANDR -screen ${SCREEN_SIZE} ${XDISPLAY} -ac &
-Xephyr -screen ${SCREEN_SIZE} ${XDISPLAY} -ac &
+Xephyr ${XDISPLAY} +extension RANDR -screen ${SCREEN_SIZE} -xinerama -ac &
+# Xephyr +extension RANDR -screen ${SCREEN_SIZE} +xinerama ${XDISPLAY} -ac &
+# Xephyr -screen ${SCREEN_SIZE} ${XDISPLAY} -ac &
 XEPHYR_PID=$!
 echo $XEPHYR_PID
 

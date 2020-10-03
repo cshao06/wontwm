@@ -1,0 +1,6 @@
+[Desktop Entry]
+Encoding=UTF-8
+Name=wontwm
+Comment=tiling window manager
+Exec=/home/cshao/repos/wontwm/target/debug/wontwm
+Type=Application

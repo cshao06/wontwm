@@ -24,6 +24,7 @@ pub const IPC_STATE_REPLY_READY: &str = "reply_ready";
 pub const IPC_STATE_SUCCESS: &str = "success";
 pub const IPC_STATE_ERROR: &str = "error";
 
+// TODO: change to a list of strings
 pub enum Command {
     BindKey,
     UnbindKey,

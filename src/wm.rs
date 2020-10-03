@@ -1,20 +1,24 @@
 use crate::{
-    xconnection::{XcbConnection, XEvent, XcbKey},
+    xconnection::{XcbConnection, XEvent, XcbKey, Rectangle},
     bindings::Bindings,
     window::WindowInfo,
     ipc,
     ipc::IpcServer,
+    workspace::{Workspace},
+    // view::View,
+    tag::{Tag},
+    view::{View, VirtualMonitor},
 };
 
 use std::{
     // io::Read,
-    process::Command,
+    // process::Command,
     collections::HashMap,
 };
-use anyhow::{Result, Context};
+use anyhow::{Result, Context, anyhow};
 
 use xcb::{Window, Atom};
-use xcb_util::{ewmh, icccm};
+// use xcb_util::{ewmh, icccm};
 
 // macro_rules! atoms {
 //     ( $( $name:ident ),+ ) => {
@@ -42,6 +46,8 @@ use xcb_util::{ewmh, icccm};
 
 // atoms!(WM_DELETE_WINDOW);
 
+pub type WsId = usize;
+pub type TagId = usize;
 
 // pub struct WindowManager<T: 'a XConn> {
 //     conn: &'a dyn XConn,
@@ -49,8 +55,12 @@ use xcb_util::{ewmh, icccm};
 pub struct WindowManager<'a> {
     conn: &'a XcbConnection,
     config: Config,
+    default_monitors: Vec<Rectangle>,
     bindings: Bindings<'a>,
     windows: HashMap<Window, WindowInfo>,
+    workspaces: Vec<Workspace>,
+    active_workspace: WsId,
+    tags: Vec<Tag>,
     focused_window: Option<Window>,
     // atoms: InternedAtoms,
     ipc_server: IpcServer<'a>,
@@ -61,19 +71,38 @@ impl<'a> WindowManager<'a> {
     pub fn new(conn: &'a XcbConnection) -> Result<Self> {
         conn.register_wm()?;
         let ipc_server = IpcServer::new(conn)?;
+        let config = Config::default();
+        let monitors = conn.get_randr_monitors();
+        let virtual_monitors: Vec<VirtualMonitor> = monitors
+            .iter()
+            .map(|&m| VirtualMonitor::new(m))
+            .collect();
+
+        let workspaces = config
+            .workspaces
+            .iter()
+            .map(|name| Workspace::new(name, View::default(virtual_monitors.clone())))
+            .collect();
+        let tags: Vec<Tag> = config
+            .tags
+            .iter()
+            .map(|name| Tag::new(name))
+            .collect();
         let mut wm = WindowManager {
             conn,
-            config: Config::default(),
+            config,
+            default_monitors: monitors,
             bindings: Bindings::new(conn),
             windows: HashMap::new(),
+            workspaces,
+            active_workspace: 0,
+            tags,
             focused_window: None,
             // atoms,
             ipc_server,
             running: false,
         };
 
-
-        wm.detect_screens();
         wm.conn.flush();
 
         Ok(wm)
@@ -121,8 +150,30 @@ impl<'a> WindowManager<'a> {
         self.running = false;
     }
 
-    /// Reset the current known screens based on currently detected outputs
-    fn detect_screens(&mut self) {
+    // fn get_monitors(&self) -> Vec<Monitor> {
+
+    //     let monitors = self.conn.get_randr_monitors();
+    //     if monitors.len() == 0 {
+    //         panic!("No active monitor detected");
+    //     }
+    //     info!("Got active monitors: {:?}", monitors);
+    //     // if monitors.len() == 0 {
+    //     //     monitors.push([Rectangle(
+    //     //         0,
+    //     //         0,
+    //     //         self.get_display_width(0),
+    //     //         self.get_display_height(0),
+    //     //     )]);
+    //     // }
+    //     monitors
+    //         .iter()
+    //         .enumerate()
+    //         .map(|(i, &m)| Monitor::new(m, i as u8)
+    //         ).collect()
+    // }
+
+    // /// Reset the current known screens based on currently detected outputs
+    // fn detect_screens(&mut self) {
         // let screens: Vec<Screen> = self
         //     .conn
         //     .current_outputs()
@@ -152,7 +203,7 @@ impl<'a> WindowManager<'a> {
 
         // let regions = self.screens.iter().map(|s| s.region(false)).collect();
         // run_hooks!(screens_updated, self, &regions);
-    }
+    // }
 
     fn handle_configure_request(&self, win: Window) {
         if self.ipc_server.is_ipc_client(win) {
@@ -241,10 +292,15 @@ impl<'a> WindowManager<'a> {
         // }
     }
 
-    fn handle_destroy_notify(&mut self, id: Window) {
-        // debug!("DESTROY_NOTIFY for {}", id);
-        self.remove_window_info(id);
-        // self.apply_layout(self.active_ws_index());
+    fn handle_destroy_notify(&mut self, win: Window) {
+        if let Some(win_info) = self.windows.get(&win) {
+            let tag = win_info.tag();
+            self.tags[tag].remove_window(win);
+            if self.active_workspace().active_view().has_tag(tag) {
+                self.apply_layout(&self.default_monitors[0], &self.tags[tag], 0);
+            }
+            self.remove_window_info(win);
+        }
     }
 
     fn handle_map_request(&mut self, win: Window, override_redirect: bool) {
@@ -253,13 +309,6 @@ impl<'a> WindowManager<'a> {
             return;
         }
 
-        let wm_name = self.conn.get_wm_name(win).unwrap_or(String::new());
-
-        let wm_class = self.conn.get_wm_class(win).unwrap_or(String::new());
-
-        // let floating = self.conn.window_should_float(id, self.floating_classes);
-        // let wix = self.active_ws_index();
-        let window_info = WindowInfo::new(win, wm_name, wm_class, false);
         // let mut client = Client::new(id, wm_name, wm_class, wix, floating);
         // run_hooks!(new_client, self, &mut client);
 
@@ -267,20 +316,33 @@ impl<'a> WindowManager<'a> {
         //     self.add_client_to_workspace(wix, id);
         // }
 
-        self.windows.insert(win, window_info);
-        self.conn.mark_new_window(win);
-        self.conn.configure_window(win, None, Some(self.config.border_width_px), Some(true));
-        self.change_focus(Some(win));
+        self.add_window(win);
 
         // self.conn.set_client_workspace(id, wix);
         // self.apply_layout(wix);
         // self.map_window_if_needed(id);
-        self.conn.map_window(win);
 
         // let s = self.screens.focused().unwrap();
         // self.conn.warp_cursor(Some(id), s);
     }
 
+    fn add_window(&mut self, win: Window) {
+        let wm_name = self.conn.get_wm_name(win).unwrap_or(String::new());
+        let wm_class = self.conn.get_wm_class(win).unwrap_or(String::new());
+        let active_tag = self.active_workspace().active_tag();
+        let window_info = WindowInfo::new(win, wm_name, wm_class, active_tag, false);
+        self.windows.insert(win, window_info);
+        // let active_tag = self.active_workspace().active_view().active_tag();
+        self.tags[active_tag].add_window(win);
+        self.change_focus(Some(win));
+
+        self.conn.mark_new_window(win);
+        self.conn.configure_window(win, None, Some(self.config.border_width_px), Some(true));
+
+        // self.draw_view(self.active_workspace().active_view());
+        self.apply_layout(&self.default_monitors[0], &self.tags[active_tag], 0);
+        self.conn.map_window(win);
+    }
     // fn map_window_if_needed(&mut self, id: Window) {
     //     if let Some(c) = self.client_map.get_mut(&id) {
     //         if !c.mapped {
@@ -289,6 +351,30 @@ impl<'a> WindowManager<'a> {
     //         }
     //     }
     // }
+
+    fn active_workspace(&self) -> &Workspace {
+        &self.workspaces[self.active_workspace]
+    }
+
+    fn draw_view(&self, view: &View) {
+    }
+
+    fn apply_layout(&self, frame: &Rectangle, tag: &Tag, layout: u8) {
+        let num_win = tag.windows().len();
+        debug!("num_win {}", num_win);
+        for (i, &win) in tag.windows().iter().enumerate() {
+            let (x, y, w, h) = frame.values();
+            let reg = Rectangle::new(
+                x + (w / num_win as u32 * i as u32) as i32,
+                y,
+                w / (num_win as u32),
+                h);
+            self.conn.configure_window(win, Some(reg), None, None);
+            // self.conn.flush();
+            // self.conn.map_window(win);
+        }
+        // self.conn.unmap_window(win);
+    }
 
     /// Kill the focused window.
     pub fn kill_focused(&mut self) {
@@ -410,6 +496,8 @@ impl<'a> WindowManager<'a> {
 pub struct Config {
     /// Default workspace names to use when initialising the WindowManager. Must have at least one element.
     pub workspaces: Vec<String>,
+    /// Default tag names to use when initialising the WindowManager. Must have at least one element.
+    pub tags: Vec<String>,
     /// _NET_WM_WINDOW_TYPE_XXX values that should always be treated as floating.
     pub floating_window_types: &'static [&'static str],
     /// Focused boder color
@@ -439,6 +527,7 @@ impl Config {
     pub fn default() -> Config {
         Config {
             workspaces: vec_of_strings!["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            tags : vec_of_strings!["1", "2", "3", "4", "5", "6", "7", "8", "9"],
             floating_window_types: &["DIALOG", "UTILITY", "SPLASH"],
             focused_border_color: 0xcc241d,   // #cc241d
             unfocused_border_color: 0x3c3836, // #3c3836
